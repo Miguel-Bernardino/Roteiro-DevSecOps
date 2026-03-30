@@ -1,0 +1,87 @@
+name: Security Scan (SAST)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  semgrep-sast:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep # Imagem oficial do Semgrep para gerar o relatório
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST
+        run: |
+          semgrep scan --json --output gl-sast-report.json --config auto
+
+      - name: Upload SAST Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sast-report
+          path: gl-sast-report.json
+
+  check-sast-report:
+    needs: semgrep-sast
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Download SAST Report
+        uses: actions/download-artifact@v4
+        with:
+          name: sast-report
+
+      - name: Validate SAST Report
+        run: |
+          python -c "
+          import json
+          import sys
+
+          try:
+              with open('gl-sast-report.json') as f:
+                  report = json.load(f)
+          except FileNotFoundError:
+              print('Erro: Relatório não encontrado.')
+              sys.exit(1)
+
+          # O Semgrep gera um formato ligeiramente diferente se não for o template do GitLab, 
+          # mas se você usar o scan padrão do Semgrep, as keys costumam ser 'results'.
+          # Ajustei para buscar tanto 'vulnerabilities' (formato GitLab) quanto 'results' (Semgrep puro).
+          vulnerabilities = report.get('vulnerabilities', report.get('results', []))
+
+          if vulnerabilities:
+              print(f'\n== Relatório de Vulnerabilidades ({len(vulnerabilities)} encontradas) ==')
+              for vuln in vulnerabilities:
+                  # Mapeamento para lidar com pequenas diferenças de nomes entre formatos
+                  name = vuln.get('name') or vuln.get('check_id', 'Sem nome')
+                  extra = vuln.get('extra', {})
+                  description = vuln.get('description') or extra.get('message', 'Sem descrição').replace('\n', ' ')
+                  
+                  location = vuln.get('location', {})
+                  file = location.get('file') or vuln.get('path', 'Arquivo não especificado')
+                  start_line = location.get('start_line') or vuln.get('start', {}).get('line', '?')
+                  
+                  severity = vuln.get('severity', 'Severidade não especificada')
+
+                  print(f'\n- Nome: {name}')
+                  print(f'  Severidade: {severity}')
+                  print(f'  Descrição: {description}')
+                  print(f'  Arquivo: {file}')
+                  print(f'  Linha: {start_line}')
+              
+              sys.exit(1)
+          else:
+              print('Nenhuma vulnerabilidade encontrada.')
+          "
